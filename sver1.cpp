@@ -34,7 +34,6 @@ std::map<int, Room> rooms;
 std::mutex mtx;
 int roomCounter = 0;
 
-// --- 파일 관련 함수 ---
 std::string getRoomUploadDir(int roomId) {
     return "uploads/" + std::to_string(roomId) + "/";
 }
@@ -82,14 +81,21 @@ bool receiveFile(int sock, const std::string& filePath, int fileSize) {
     return true;
 }
 
+void sendDownloadHeader(int sock, int fileSize) {
+    std::string notice = "파일 크기를 4바이트 int로 먼저 전송합니다. 그 다음 파일 데이터가 전송됩니다.\n";
+    int fileSizeNet = htonl(fileSize);
+    std::vector<char> header(notice.begin(), notice.end());
+    header.insert(header.end(), (char*)&fileSizeNet, (char*)&fileSizeNet + sizeof(fileSizeNet));
+    send(sock, header.data(), header.size(), 0);
+}
+
 bool sendFile(int sock, const std::string& filePath) {
     std::ifstream ifs(filePath, std::ios::binary | std::ios::ate);
     if (!ifs) return false;
     int fileSize = ifs.tellg();
     ifs.seekg(0);
 
-    int fileSizeNet = htonl(fileSize);
-    send(sock, &fileSizeNet, sizeof(fileSizeNet), 0);
+    sendDownloadHeader(sock, fileSize);
 
     char buffer[BUFFER_SIZE];
     int sent = 0;
@@ -104,7 +110,6 @@ bool sendFile(int sock, const std::string& filePath) {
     return true;
 }
 
-// --- 기존 채팅 기능 ---
 void sendToClient(int sock, const std::string& message) {
     send(sock, message.c_str(), message.length(), 0);
 }
@@ -315,7 +320,6 @@ void handleClient(int clientSock) {
                 sendToClient(clientSock, "파일이 존재하지 않습니다.\n");
                 continue;
             }
-            sendToClient(clientSock, "파일 크기를 4바이트 int로 먼저 전송합니다. 그 다음 파일 데이터가 전송됩니다.\n");
             if (sendFile(clientSock, filePath)) {
                 std::cout << "파일 다운로드: " << filePath << "\n";
             } else {
