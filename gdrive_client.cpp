@@ -3,8 +3,6 @@
 #include <sstream>
 #include <string>
 #include <vector>
-#include <thread>
-#include <atomic>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -14,7 +12,8 @@
 #define BUFFER_SIZE 8192
 
 int sock = -1;
-std::atomic<bool> running(true);
+
+std::string current_dir = ""; // 현재 경로 (""는 루트)
 
 void usage() {
     std::cout <<
@@ -28,29 +27,13 @@ void usage() {
     "/unshare <경로> <상대유저>\n"
     "/sharedwithme\n"
     "/search <키워드>\n"
-    "/msg <상대유저> <메시지>\n"
+    "/cd <폴더명>\n"
+    "/pwd\n"
     "/quit\n";
 }
 
 void send_cmd(const std::string& cmd) {
     send(sock, cmd.c_str(), cmd.size(), 0);
-}
-
-void recv_thread() {
-    char buf[BUFFER_SIZE];
-    while (running) {
-        memset(buf, 0, sizeof(buf));
-        int len = recv(sock, buf, sizeof(buf)-1, MSG_DONTWAIT);
-        if (len > 0) {
-            buf[len] = 0;
-            std::string resp(buf, len);
-            if (resp.substr(0, 4) == "MSG|") {
-                std::cout << "\n[받은메시지] " << resp.substr(4);
-                std::cout << "> " << std::flush;
-            }
-        }
-        usleep(100 * 1000);
-    }
 }
 
 std::string recv_resp() {
@@ -60,6 +43,35 @@ std::string recv_resp() {
     if (len <= 0) return "";
     buf[len] = 0;
     return std::string(buf, len);
+}
+
+// 경로 결합 함수: 현재경로+상대경로
+std::string join_path(const std::string& dir, const std::string& path) {
+    if (path.empty()) return dir;
+    if (path[0] == '/') return path; // 절대경로
+    if (dir.empty()) return path;
+    return dir + "/" + path;
+}
+
+// 경로 정규화 (.., . 처리)
+std::string normalize_path(const std::string& path) {
+    std::vector<std::string> stack;
+    std::istringstream iss(path);
+    std::string token;
+    while (getline(iss, token, '/')) {
+        if (token.empty() || token == ".") continue;
+        if (token == "..") {
+            if (!stack.empty()) stack.pop_back();
+        } else {
+            stack.push_back(token);
+        }
+    }
+    std::string result;
+    for (const auto& t : stack) {
+        if (!result.empty()) result += "/";
+        result += t;
+    }
+    return result;
 }
 
 int main() {
@@ -106,100 +118,114 @@ int main() {
 
     usage();
 
-    std::thread th(recv_thread);
-
     while (true) {
-        std::cout << "> ";
+        std::cout << (current_dir.empty() ? "~" : current_dir) << " > ";
         std::string line;
         std::getline(std::cin, line);
         if (line == "/help") { usage(); continue; }
         if (line == "/quit") {
-            running = false;
             send_cmd("/quit|\n");
             break;
         }
         std::istringstream iss(line);
-        std::string cmd, arg1;
-        iss >> cmd >> arg1;
+        std::string cmd, arg1, arg2;
+        iss >> cmd >> arg1 >> arg2;
 
-        if (cmd == "/msg") {
-            std::string msg;
-            std::getline(iss, msg);
-            if (!msg.empty() && msg[0] == ' ') msg = msg.substr(1);
+        if (cmd == "/pwd") {
+            std::cout << "/" << (current_dir.empty() ? "" : current_dir) << std::endl;
+        }
+        else if (cmd == "/cd") {
+            if (arg1.empty()) {
+                std::cout << "이동할 폴더명을 입력하세요.\n";
+                continue;
+            }
+            std::string new_dir = join_path(current_dir, arg1);
+            new_dir = normalize_path(new_dir);
+            // 서버에 실제 폴더 존재 여부 확인
             std::ostringstream oss;
-            oss << cmd << "|" << arg1 << "|" << msg << "|\n";
+            oss << "/ls|" << new_dir << "|\n";
             send_cmd(oss.str());
             std::string resp = recv_resp();
-            std::cout << resp;
+            if (resp.find("OK|") == 0 && resp.find("(폴더 없음)") == std::string::npos) {
+                current_dir = new_dir;
+            } else {
+                std::cout << "폴더가 존재하지 않습니다.\n";
+            }
         }
         else if (cmd == "/ls") {
+            std::string path = arg1.empty() ? current_dir : join_path(current_dir, arg1);
+            path = normalize_path(path);
             std::ostringstream oss;
-            oss << cmd << "|" << arg1 << "|\n";
+            oss << "/ls|" << path << "|\n";
             send_cmd(oss.str());
             std::cout << recv_resp();
         }
         else if (cmd == "/mkdir") {
+            std::string path = join_path(current_dir, arg1);
+            path = normalize_path(path);
             std::ostringstream oss;
-            oss << cmd << "|" << arg1 << "|\n";
+            oss << "/mkdir|" << path << "|\n";
             send_cmd(oss.str());
             std::cout << recv_resp();
         }
         else if (cmd == "/rm") {
+            std::string path = join_path(current_dir, arg1);
+            path = normalize_path(path);
             std::ostringstream oss;
-            oss << cmd << "|" << arg1 << "|\n";
+            oss << "/rm|" << path << "|\n";
             send_cmd(oss.str());
             std::cout << recv_resp();
         }
         else if (cmd == "/mv") {
-            std::string arg2;
-            iss >> arg2;
+            std::string from = join_path(current_dir, arg1);
+            from = normalize_path(from);
+            std::string to = join_path(current_dir, arg2);
+            to = normalize_path(to);
             std::ostringstream oss;
-            oss << cmd << "|" << arg1 << "|" << arg2 << "|\n";
+            oss << "/mv|" << from << "|" << to << "|\n";
             send_cmd(oss.str());
             std::cout << recv_resp();
         }
         else if (cmd == "/share") {
-            std::string arg2;
-            iss >> arg2;
+            std::string path = join_path(current_dir, arg1);
+            path = normalize_path(path);
             std::ostringstream oss;
-            oss << cmd << "|" << arg1 << "|" << arg2 << "|\n";
+            oss << "/share|" << path << "|" << arg2 << "|\n";
             send_cmd(oss.str());
             std::cout << recv_resp();
         }
         else if (cmd == "/unshare") {
-            std::string arg2;
-            iss >> arg2;
+            std::string path = join_path(current_dir, arg1);
+            path = normalize_path(path);
             std::ostringstream oss;
-            oss << cmd << "|" << arg1 << "|" << arg2 << "|\n";
+            oss << "/unshare|" << path << "|" << arg2 << "|\n";
             send_cmd(oss.str());
             std::cout << recv_resp();
         }
         else if (cmd == "/sharedwithme") {
             std::ostringstream oss;
-            oss << cmd << "||\n";
+            oss << "/sharedwithme||\n";
             send_cmd(oss.str());
             std::cout << recv_resp();
         }
         else if (cmd == "/search") {
             std::ostringstream oss;
-            oss << cmd << "|" << arg1 << "|\n";
+            oss << "/search|" << arg1 << "|\n";
             send_cmd(oss.str());
             std::cout << recv_resp();
         }
         else if (cmd == "/upload") {
-            std::string arg2;
-            iss >> arg2;
-            std::string local = arg1;
-            std::string remote = arg2.empty() ? arg1 : arg2;
-            std::ifstream ifs(local, std::ios::binary | std::ios::ate);
+            std::string remote = join_path(current_dir, arg2.empty() ? arg1 : arg2);
+            remote = normalize_path(remote);
+            std::ifstream ifs(arg1, std::ios::binary | std::ios::ate);
             if (!ifs) {
-                std::cout << "파일 열기 실패: " << local << std::endl;
+                std::cout << "파일 열기 실패: " << arg1 << std::endl;
                 continue;
             }
             int filesize = ifs.tellg();
             ifs.seekg(0);
             std::ostringstream oss;
-            oss << cmd << "|" << remote << "|" << filesize << "|\n";
+            oss << "/upload|" << remote << "|" << filesize << "|\n";
             send_cmd(oss.str());
             char buf[BUFFER_SIZE];
             int sent = 0;
@@ -219,12 +245,11 @@ int main() {
             std::cout << recv_resp();
         }
         else if (cmd == "/download") {
-            std::string arg2;
-            iss >> arg2;
-            std::string remote = arg1;
+            std::string remote = join_path(current_dir, arg1);
+            remote = normalize_path(remote);
             std::string local = arg2.empty() ? arg1 : arg2;
             std::ostringstream oss;
-            oss << cmd << "|" << remote << "|\n";
+            oss << "/download|" << remote << "|\n";
             send_cmd(oss.str());
             std::string resp = recv_resp();
             if (resp.substr(0, 3) != "OK|") {
@@ -259,7 +284,6 @@ int main() {
             std::cout << "알 수 없는 명령. /help로 도움말 확인\n";
         }
     }
-    th.join();
     close(sock);
     return 0;
 }

@@ -18,8 +18,6 @@
 
 std::mutex user_mutex;
 std::mutex share_mutex;
-std::mutex conn_mutex;
-std::map<std::string, int> user_conn; // username -> client_sock
 
 std::string user_db_file = "server_data/users/.userdb";
 std::map<std::string, std::string> user_db;
@@ -202,10 +200,6 @@ void handle_client(int client_sock) {
     }
 
     {
-        std::lock_guard<std::mutex> lock(conn_mutex);
-        user_conn[username] = client_sock;
-    }
-    {
         std::lock_guard<std::mutex> lock(share_mutex);
         load_share_map();
     }
@@ -222,19 +216,7 @@ void handle_client(int client_sock) {
         getline(iss, arg1, '|');
         getline(iss, arg2, '|');
 
-        if (cmd == "/msg") {
-            std::lock_guard<std::mutex> lock(conn_mutex);
-            auto it = user_conn.find(arg1);
-            if (it != user_conn.end()) {
-                std::ostringstream oss;
-                oss << "MSG|[" << username << "] " << arg2 << "\n";
-                send(it->second, oss.str().c_str(), oss.str().size(), 0);
-                send(client_sock, "OK|메시지 전송 완료\n", 32, 0);
-            } else {
-                send(client_sock, "ERR|상대방이 온라인이 아님\n", 44, 0);
-            }
-        }
-        else if (cmd == "/share") {
+        if (cmd == "/share") {
             bool user_ok = false;
             {
                 std::lock_guard<std::mutex> ulock(user_mutex);
@@ -434,10 +416,6 @@ void handle_client(int client_sock) {
         else {
             send(client_sock, "ERR|알 수 없는 명령\n", 28, 0);
         }
-    }
-    {
-        std::lock_guard<std::mutex> lock(conn_mutex);
-        if (!username.empty()) user_conn.erase(username);
     }
     close(client_sock);
 }
