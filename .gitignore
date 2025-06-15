@@ -1,0 +1,31 @@
+# 빌드/컴파일 출력 파일
+*.o
+*.out
+*.exe
+*.log
+sver1
+server
+client
+cver1
+# 시스템 관련
+.DS_Store
+Thumbs.db
+
+# IDE 및 편집기 설정
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git 자체 파일
+.git/
+
+# 캐시 및 임시 파일
+*.tmp
+*.cache
+*.bak
+
+# 프로젝트 관련
+uploads/       # 파일 업로드용 디렉터리 (예: 사용자 파일 저장 공간)
+downloads/     # 다운로드한 파일 저장 공간
+storage/       # 기타 저장소 관련 폴더
