@@ -11,23 +11,26 @@
 #include <dirent.h>
 #include <cstring>
 
-// ---- Constants ----
-constexpr int PORT = 9001;
-constexpr int BUFFER_SIZE = 8192;
-const std::string DATA_ROOT = "server_data/users/";
-const std::string USER_DB_FILE = DATA_ROOT + ".userdb";
-const std::string SHARE_MAP_FILE = "server_data/sharemap.txt";
+// ---- 전역 상수 정의 ----
+constexpr int PORT = 9001;        // 서버가 listen할 포트 번호
+constexpr int BUFFER_SIZE = 8192; // 버퍼 크기 (파일 송수신 등)
+const std::string DATA_ROOT = "server_data/users/";         // 유저별 데이터 저장 폴더
+const std::string USER_DB_FILE = DATA_ROOT + ".userdb";     // 유저 ID/PW 저장 파일
+const std::string SHARE_MAP_FILE = "server_data/sharemap.txt"; // 파일/폴더 공유 정보 저장 파일
 
-// ---- Mutexes ----
-std::mutex user_mutex, share_mutex, conn_mutex;
+// ---- 동시성 제어용 mutex ----
+std::mutex user_mutex;  // user_db 접근 보호
+std::mutex share_mutex; // share_map 접근 보호
+std::mutex conn_mutex;  // user_conn(접속자목록) 보호
 
-// ---- Global State ----
-std::map<std::string, std::string> user_db;
-std::multimap<std::string, std::pair<std::string, std::string>> share_map;
-std::map<std::string, int> user_conn; // username -> client_sock
+// ---- 서버 상태를 저장하는 주요 자료구조 ----
+std::map<std::string, std::string> user_db; // {id:pw} 유저 정보
+std::multimap<std::string, std::pair<std::string, std::string>> share_map; // to_user -> (from_user, path)
+std::map<std::string, int> user_conn; // {username: client_sock} 현재 접속 중인 유저
 
-// ---- Utility Functions ----
+// ---- 파일/디렉토리, 유저DB, 공유DB 등 유틸리티 함수 ----
 namespace util {
+    // 지정한 경로의 디렉토리가 없으면 생성
     void ensure_dir(const std::string& path) {
         struct stat st;
         if (stat(path.c_str(), &st) != 0) {
@@ -35,6 +38,7 @@ namespace util {
         }
     }
 
+    // 유저 전용 디렉토리 없으면 생성 (ex: server_data/users/아이디)
     bool ensure_user_dir(const std::string& user) {
         std::string path = DATA_ROOT + user;
         ensure_dir(DATA_ROOT);
@@ -43,6 +47,7 @@ namespace util {
         return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
     }
 
+    // 유저 DB(.userdb) 파일 읽어서 user_db map 채우기
     void load_user_db() {
         user_db.clear();
         std::ifstream ifs(USER_DB_FILE);
@@ -53,11 +58,13 @@ namespace util {
             if (iss >> id >> pw) user_db[id] = pw;
         }
     }
+    // user_db 맵 내용을 .userdb 파일에 저장
     void save_user_db() {
         std::ofstream ofs(USER_DB_FILE);
         for (const auto& kv : user_db) ofs << kv.first << " " << kv.second << "\n";
     }
 
+    // 공유 정보 파일에서 share_map 채우기 (다중 공유 허용: multimap)
     void load_share_map() {
         share_map.clear();
         std::ifstream ifs(SHARE_MAP_FILE);
@@ -69,12 +76,14 @@ namespace util {
                 share_map.insert({to_user, {from_user, path}});
         }
     }
+    // share_map 내용을 공유 정보 파일로 저장
     void save_share_map() {
         std::ofstream ofs(SHARE_MAP_FILE);
         for (const auto& kv : share_map)
             ofs << kv.first << " " << kv.second.first << " " << kv.second.second << "\n";
     }
 
+    // 지정 디렉토리 내 파일/폴더 목록 문자열로 반환
     std::string list_dir(const std::string& path) {
         std::ostringstream oss;
         DIR* dp = opendir(path.c_str());
@@ -91,12 +100,14 @@ namespace util {
         return oss.str();
     }
 
+    // 디렉토리 생성 (이미 있으면 false)
     bool make_dir(const std::string& path) {
         struct stat st;
         if (stat(path.c_str(), &st) == 0) return false;
         return mkdir(path.c_str(), 0755) == 0;
     }
 
+    // 파일/폴더 재귀 삭제
     bool remove_path(const std::string& path) {
         struct stat st;
         if (stat(path.c_str(), &st) != 0) return false;
@@ -116,6 +127,7 @@ namespace util {
         }
     }
 
+    // 파일/폴더 이동(이름변경)
     bool move_path(const std::string& from, const std::string& to) {
         size_t slash = to.find_last_of('/');
         if (slash != std::string::npos) {
@@ -124,6 +136,7 @@ namespace util {
         return rename(from.c_str(), to.c_str()) == 0;
     }
 
+    // 파일/디렉토리 재귀 검색 (키워드 포함 파일/폴더명 반환)
     void search_recursive(
         const std::string& base,
         const std::string& path,
@@ -148,16 +161,19 @@ namespace util {
     }
 } // namespace util
 
-// ---- Client Handler ----
+// ---- 클라이언트와의 통신 및 명령 핸들러 ----
 
+// 클라이언트에게 문자열 응답 전송 (send)
 void send_response(int client_sock, const std::string& msg) {
     send(client_sock, msg.c_str(), msg.size(), 0);
 }
 
+// /msg 명령 처리: 사용자가 다른 사용자에게 메시지 전송
 void handle_msg(int client_sock, const std::string& sender, const std::string& target, const std::string& message) {
     std::lock_guard<std::mutex> lock(conn_mutex);
     auto it = user_conn.find(target);
     if (it != user_conn.end()) {
+        // 수신자에게 메시지 전달
         std::ostringstream oss;
         oss << "MSG|[" << sender << "] " << message << "\n";
         send_response(it->second, oss.str());
@@ -167,7 +183,9 @@ void handle_msg(int client_sock, const std::string& sender, const std::string& t
     }
 }
 
-// ---- 로그인/회원가입 & 중복 로그인 방지 ----
+// ---- 로그인/회원가입 및 중복 로그인 방지 ----
+
+// 로그인 시도: 아이디/비밀번호 오류를 구분해서 응답
 bool try_login(const std::string& id, const std::string& pw, std::string& response) {
     std::lock_guard<std::mutex> lock(user_mutex);
     util::load_user_db();
@@ -190,6 +208,7 @@ bool try_login(const std::string& id, const std::string& pw, std::string& respon
     return true;
 }
 
+// 회원가입 시도: 이미 존재하는 아이디면 오류
 bool try_signup(const std::string& id, const std::string& pw, std::string& response) {
     std::lock_guard<std::mutex> lock(user_mutex);
     util::load_user_db();
@@ -203,14 +222,16 @@ bool try_signup(const std::string& id, const std::string& pw, std::string& respo
     return true;
 }
 
+// ---- 클라이언트 1명당 1스레드: 명령 반복 처리 루프 ----
 void handle_client(int client_sock) {
     char buffer[BUFFER_SIZE];
     std::string username;
     bool logged_in = false;
 
+    // 로그인 또는 회원가입 안내
     send_response(client_sock, "OK|로그인 또는 회원가입 선택: (1) 로그인 (2) 회원가입 입력\n");
 
-    // --- 로그인/회원가입 루프 ---
+    // --- 로그인/회원가입 루프 (로그인 성공시까지 반복) ---
     while (!logged_in) {
         memset(buffer, 0, sizeof(buffer));
         int len = recv(client_sock, buffer, sizeof(buffer)-1, 0);
@@ -244,16 +265,18 @@ void handle_client(int client_sock) {
         }
     }
 
+    // 로그인 성공 후 user_conn에 등록
     {
         std::lock_guard<std::mutex> lock(conn_mutex);
         user_conn[username] = client_sock;
     }
+    // 공유맵 로드
     {
         std::lock_guard<std::mutex> lock(share_mutex);
         util::load_share_map();
     }
 
-    // --- 명령어 루프 ---
+    // --- 명령어 처리 메인 루프 ---
     while (true) {
         memset(buffer, 0, sizeof(buffer));
         int len = recv(client_sock, buffer, sizeof(buffer)-1, 0);
@@ -265,17 +288,19 @@ void handle_client(int client_sock) {
         getline(iss, arg1, '|');
         getline(iss, arg2, '|');
 
+        // 각종 명령별 분기 처리
         if (cmd == "/msg") {
             std::string message = arg2;
             // 메시지에 |가 포함될 경우 뒷부분도 붙여줌
             std::string extra;
             getline(iss, extra, '|');
             if (!extra.empty()) message += "|" + extra;
-            // 메시지 끝에 |가 붙어 오면 제거 (방어적)
+            // 메시지 끝에 |가 붙어 오면 제거
             if (!message.empty() && message.back() == '|') message.pop_back();
             handle_msg(client_sock, username, arg1, message);
         }
         else if (cmd == "/who") {
+            // 현재 온라인 유저 목록
             std::ostringstream oss;
             oss << "OK|";
             {
@@ -287,6 +312,7 @@ void handle_client(int client_sock) {
             send_response(client_sock, oss.str());
         }
         else if (cmd == "/share") {
+            // 파일/폴더 공유 요청
             bool user_ok = false;
             {
                 std::lock_guard<std::mutex> ulock(user_mutex);
@@ -317,6 +343,7 @@ void handle_client(int client_sock) {
             }
         }
         else if (cmd == "/unshare") {
+            // 공유 해제
             {
                 std::lock_guard<std::mutex> slock(share_mutex);
                 util::load_share_map();
@@ -338,6 +365,7 @@ void handle_client(int client_sock) {
             }
         }
         else if (cmd == "/sharedwithme") {
+            // 나에게 공유된 항목 목록
             std::ostringstream oss;
             {
                 std::lock_guard<std::mutex> slock(share_mutex);
@@ -351,11 +379,13 @@ void handle_client(int client_sock) {
             send_response(client_sock, "OK|" + result);
         }
         else if (cmd == "/ls") {
+            // 내 디렉토리/하위 디렉토리 목록
             std::string dir = DATA_ROOT + username + (arg1.empty() ? "" : "/" + arg1);
             std::string result = util::list_dir(dir);
             send_response(client_sock, "OK|" + result);
         }
         else if (cmd == "/mkdir") {
+            // 내 디렉토리 하위 폴더 생성
             std::string dir = DATA_ROOT + username + "/" + arg1;
             if (util::make_dir(dir))
                 send_response(client_sock, "OK|폴더 생성 성공\n");
@@ -363,6 +393,7 @@ void handle_client(int client_sock) {
                 send_response(client_sock, "ERR|폴더 생성 실패\n");
         }
         else if (cmd == "/rm") {
+            // 파일/폴더 삭제
             std::string path = DATA_ROOT + username + "/" + arg1;
             if (util::remove_path(path))
                 send_response(client_sock, "OK|삭제 성공\n");
@@ -370,6 +401,7 @@ void handle_client(int client_sock) {
                 send_response(client_sock, "ERR|삭제 실패\n");
         }
         else if (cmd == "/mv") {
+            // 파일/폴더 이름 변경/이동
             std::string from = DATA_ROOT + username + "/" + arg1;
             std::string to = DATA_ROOT + username + "/" + arg2;
             if (util::move_path(from, to))
@@ -378,6 +410,7 @@ void handle_client(int client_sock) {
                 send_response(client_sock, "ERR|이동/이름변경 실패\n");
         }
         else if (cmd == "/upload") {
+            // 파일 업로드 (클라->서버)
             std::string fpath = DATA_ROOT + username + "/" + arg1;
             int filesize = stoi(arg2);
             size_t slash = fpath.find_last_of('/');
@@ -399,6 +432,7 @@ void handle_client(int client_sock) {
                 send_response(client_sock, "ERR|업로드 실패\n");
         }
         else if (cmd == "/download") {
+            // 파일 다운로드 (서버->클라)
             std::string fpath = DATA_ROOT + username + "/" + arg1;
             struct stat st;
             bool found = false, shared = false;
@@ -406,6 +440,7 @@ void handle_client(int client_sock) {
             if (stat(fpath.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
                 found = true;
             } else {
+                // 공유받은 파일인지 확인
                 std::lock_guard<std::mutex> slock(share_mutex);
                 util::load_share_map();
                 for (auto it = share_map.lower_bound(username); it != share_map.upper_bound(username); ++it) {
@@ -448,11 +483,13 @@ void handle_client(int client_sock) {
             ifs.close();
         }
         else if (cmd == "/search") {
+            // 파일/폴더명 키워드 검색
             std::string keyword = arg1;
             std::vector<std::string> results;
             std::string userdir = DATA_ROOT + username;
             util::search_recursive(userdir, "", keyword, results);
             {
+                // 공유받은 항목도 검색 결과에 추가
                 std::lock_guard<std::mutex> slock(share_mutex);
                 util::load_share_map();
                 for (auto it = share_map.lower_bound(username); it != share_map.upper_bound(username); ++it) {
@@ -472,13 +509,16 @@ void handle_client(int client_sock) {
             send_response(client_sock, oss.str());
         }
         else if (cmd == "/quit") {
+            // 클라이언트 연결 종료
             break;
         }
         else {
+            // 알 수 없는 명령어
             send_response(client_sock, "ERR|알 수 없는 명령\n");
         }
     }
 
+    // 연결 종료 시 user_conn에서 제거
     {
         std::lock_guard<std::mutex> lock(conn_mutex);
         if (!username.empty()) user_conn.erase(username);
@@ -486,13 +526,15 @@ void handle_client(int client_sock) {
     close(client_sock);
 }
 
-// ---- Main Entrypoint ----
-
+// ---- 서버 메인 함수: listen, accept, 스레드 분기 ----
 int main() {
+    // 서버 데이터 폴더 및 파일 생성(없을 시)
     util::ensure_dir("server_data");
     util::ensure_dir(DATA_ROOT);
     { std::ofstream touch(USER_DB_FILE, std::ios::app); touch.close(); }
     { std::ofstream touch2(SHARE_MAP_FILE, std::ios::app); touch2.close(); }
+
+    // 유저/공유 정보 미리 로드
     {
         std::lock_guard<std::mutex> lock(user_mutex);
         util::load_user_db();
@@ -502,6 +544,7 @@ int main() {
         util::load_share_map();
     }
 
+    // 서버 소켓 생성 및 바인드, 리슨
     int serv_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (serv_sock < 0) { std::cerr << "소켓 생성 실패\n"; return 1; }
     sockaddr_in serv_addr;
@@ -515,10 +558,12 @@ int main() {
         std::cerr << "리스닝 실패\n"; return 3;
     }
     std::cout << "서버 시작: 포트 " << PORT << std::endl;
+
+    // 클라이언트 접속시마다 스레드 분기
     while (true) {
         int cli_sock = accept(serv_sock, nullptr, nullptr);
         if (cli_sock < 0) continue;
-        std::thread t(handle_client, cli_sock);
+        std::thread t(handle_client, cli_sock); // 각 클라별 스레드
         t.detach();
     }
     return 0;
