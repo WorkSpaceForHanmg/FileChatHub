@@ -167,6 +167,38 @@ void handle_msg(int client_sock, const std::string& sender, const std::string& t
     }
 }
 
+// ---- 로그인/회원가입 & 중복 로그인 방지 ----
+bool try_login(const std::string& id, const std::string& pw, std::string& response) {
+    std::lock_guard<std::mutex> lock(user_mutex);
+    util::load_user_db();
+    if (!user_db.count(id) || user_db[id] != pw) {
+        response = "ERR|로그인 실패. 다시 시도\n";
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock2(conn_mutex);
+        if (user_conn.count(id)) {
+            response = "ERR|이미 로그인 중인 계정입니다\n";
+            return false;
+        }
+    }
+    response = "OK|로그인 성공\n";
+    return true;
+}
+
+bool try_signup(const std::string& id, const std::string& pw, std::string& response) {
+    std::lock_guard<std::mutex> lock(user_mutex);
+    util::load_user_db();
+    if (user_db.count(id)) {
+        response = "ERR|이미 존재하는 아이디입니다. 다시 시도\n";
+        return false;
+    }
+    user_db[id] = pw;
+    util::save_user_db();
+    response = "OK|회원가입 및 로그인 성공\n";
+    return true;
+}
+
 void handle_client(int client_sock) {
     char buffer[BUFFER_SIZE];
     std::string username;
@@ -186,32 +218,25 @@ void handle_client(int client_sock) {
         getline(iss, id, '|');
         getline(iss, pw, '|');
 
-        {
-            std::lock_guard<std::mutex> lock(user_mutex);
-            util::load_user_db();
-            if (mode == "1") { // 로그인
-                if (user_db.count(id) && user_db[id] == pw) {
-                    username = id;
-                    logged_in = true;
-                    util::ensure_user_dir(username);
-                    send_response(client_sock, "OK|로그인 성공\n");
-                } else {
-                    send_response(client_sock, "ERR|로그인 실패. 다시 시도\n");
-                }
+        std::string response;
+        if (mode == "1") { // 로그인
+            if (try_login(id, pw, response)) {
+                username = id;
+                logged_in = true;
+                util::ensure_user_dir(username);
             }
-            else if (mode == "2") { // 회원가입
-                if (user_db.count(id)) {
-                    send_response(client_sock, "ERR|이미 존재하는 아이디입니다. 다시 시도\n");
-                } else {
-                    user_db[id] = pw;
-                    util::save_user_db();
-                    username = id;
-                    logged_in = true;
-                    util::ensure_user_dir(username);
-                    send_response(client_sock, "OK|회원가입 및 로그인 성공\n");
-                }
+            send_response(client_sock, response);
+        }
+        else if (mode == "2") { // 회원가입
+            if (try_signup(id, pw, response)) {
+                username = id;
+                logged_in = true;
+                util::ensure_user_dir(username);
             }
-            else send_response(client_sock, "ERR|1 또는 2만 입력 가능\n");
+            send_response(client_sock, response);
+        }
+        else {
+            send_response(client_sock, "ERR|1 또는 2만 입력 가능\n");
         }
     }
 
@@ -242,6 +267,8 @@ void handle_client(int client_sock) {
             std::string extra;
             getline(iss, extra, '|');
             if (!extra.empty()) message += "|" + extra;
+            // 메시지 끝에 |가 붙어 오면 제거 (방어적)
+            if (!message.empty() && message.back() == '|') message.pop_back();
             handle_msg(client_sock, username, arg1, message);
         }
         else if (cmd == "/who") {

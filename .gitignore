@@ -8,6 +8,8 @@ server
 client
 cver1
 uploads
+gdrive_client
+gdrive_server
 # 시스템 관련
 .DS_Store
 Thumbs.db

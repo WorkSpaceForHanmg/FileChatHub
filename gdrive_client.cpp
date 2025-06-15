@@ -146,7 +146,7 @@ int main() {
         std::cout << "비밀번호 입력: ";
         std::getline(std::cin, pw);
         std::ostringstream oss;
-        oss << mode << "|" << id << "|" << pw << " \n";
+        oss << mode << "|" << id << "|" << pw << "|\n"; // <-- 여기서 끝에 | 붙임
         send_cmd(oss.str());
         std::string resp = recv_resp();
         std::cout << resp;
@@ -323,7 +323,7 @@ int main() {
             std::ostringstream oss;
             oss << "/msg|" << arg1 << "|" << arg2;
             if (!msg.empty()) oss << " " << msg;
-            oss << "|\n";
+            oss << "\n"; // <-- 여기서 끝에 | 없이 바로 개행!
             send_cmd(oss.str());
             std::cout << recv_resp();
         }
