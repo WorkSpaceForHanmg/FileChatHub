@@ -171,8 +171,12 @@ void handle_msg(int client_sock, const std::string& sender, const std::string& t
 bool try_login(const std::string& id, const std::string& pw, std::string& response) {
     std::lock_guard<std::mutex> lock(user_mutex);
     util::load_user_db();
-    if (!user_db.count(id) || user_db[id] != pw) {
-        response = "ERR|로그인 실패. 다시 시도\n";
+    if (!user_db.count(id)) {
+        response = "ERR|존재하지 않는 아이디입니다\n";
+        return false;
+    }
+    if (user_db[id] != pw) {
+        response = "ERR|비밀번호가 틀렸습니다\n";
         return false;
     }
     {
