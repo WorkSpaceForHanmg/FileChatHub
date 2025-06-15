@@ -3,33 +3,70 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <thread>
+#include <atomic>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <cstring>
 
-#define PORT 9001
-#define BUFFER_SIZE 8192
+// ---- Constants ----
+constexpr int PORT = 9001;
+constexpr int BUFFER_SIZE = 8192;
 
+// ---- Global Variables ----
 int sock = -1;
+std::string current_dir; // "" == root
+std::atomic<bool> running(true);
 
-std::string current_dir = ""; // 현재 경로 (""는 루트)
+// ---- Function Declarations ----
+void usage();
+void send_cmd(const std::string& cmd);
+std::string recv_resp();
+std::string join_path(const std::string& dir, const std::string& path);
+std::string normalize_path(const std::string& path);
 
+// ---- 채팅/알림 수신 스레드 ----
+void recv_thread() {
+    char buf[BUFFER_SIZE];
+    std::string recv_buffer;
+    while (running) {
+        int len = recv(sock, buf, sizeof(buf)-1, MSG_DONTWAIT);
+        if (len > 0) {
+            recv_buffer.append(buf, len);
+            size_t pos;
+            // 여러 메시지가 한 번에 올 수도 있으므로 한 줄씩 분리
+            while ((pos = recv_buffer.find('\n')) != std::string::npos) {
+                std::string line = recv_buffer.substr(0, pos);
+                recv_buffer.erase(0, pos + 1);
+                if (line.substr(0, 4) == "MSG|") {
+                    std::cout << "\n[받은메시지] " << line.substr(4) << std::endl;
+                    std::cout << (current_dir.empty() ? "~" : current_dir) << " > " << std::flush;
+                }
+            }
+        }
+        usleep(100 * 1000); // 100ms
+    }
+}
+
+// ---- Helper Functions ----
 void usage() {
     std::cout <<
-    "/ls [폴더]\n"
-    "/mkdir <폴더>\n"
-    "/upload <로컬파일> [서버경로]\n"
-    "/download <서버경로> [로컬파일]\n"
-    "/rm <서버경로>\n"
-    "/mv <원경로> <새경로>\n"
-    "/share <경로> <상대유저>\n"
-    "/unshare <경로> <상대유저>\n"
-    "/sharedwithme\n"
-    "/search <키워드>\n"
-    "/cd <폴더명>\n"
-    "/pwd\n"
-    "/quit\n";
+        "/ls [폴더]\n"
+        "/mkdir <폴더>\n"
+        "/upload <로컬파일> [서버경로]\n"
+        "/download <서버경로> [로컬파일]\n"
+        "/rm <서버경로>\n"
+        "/mv <원경로> <새경로>\n"
+        "/share <경로> <상대유저>\n"
+        "/unshare <경로> <상대유저>\n"
+        "/sharedwithme\n"
+        "/search <키워드>\n"
+        "/cd <폴더명>\n"
+        "/pwd\n"
+        "/msg <상대유저> <메시지>\n"
+        "/who\n"
+        "/quit\n";
 }
 
 void send_cmd(const std::string& cmd) {
@@ -45,15 +82,15 @@ std::string recv_resp() {
     return std::string(buf, len);
 }
 
-// 경로 결합 함수: 현재경로+상대경로
+// 현재경로 + 상대경로 -> 합쳐진 경로 반환
 std::string join_path(const std::string& dir, const std::string& path) {
     if (path.empty()) return dir;
-    if (path[0] == '/') return path; // 절대경로
+    if (path[0] == '/') return path; // absolute
     if (dir.empty()) return path;
     return dir + "/" + path;
 }
 
-// 경로 정규화 (.., . 처리)
+// /a/b/../c/./d -> a/c/d 변환
 std::string normalize_path(const std::string& path) {
     std::vector<std::string> stack;
     std::istringstream iss(path);
@@ -74,6 +111,7 @@ std::string normalize_path(const std::string& path) {
     return result;
 }
 
+// ---- Main ----
 int main() {
     std::string serv_ip;
     std::cout << "서버 IP 입력: ";
@@ -84,7 +122,7 @@ int main() {
         std::cerr << "소켓 생성 실패\n";
         return 1;
     }
-    sockaddr_in serv_addr;
+    sockaddr_in serv_addr{};
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
     inet_pton(AF_INET, serv_ip.c_str(), &serv_addr.sin_addr);
@@ -97,6 +135,7 @@ int main() {
     std::string welcome = recv_resp();
     std::cout << welcome;
 
+    // 로그인/회원가입
     bool logged_in = false;
     while (!logged_in) {
         std::string mode, id, pw;
@@ -107,30 +146,30 @@ int main() {
         std::cout << "비밀번호 입력: ";
         std::getline(std::cin, pw);
         std::ostringstream oss;
-        oss << mode << "|" << id << "|" << pw << "|\n";
+        oss << mode << "|" << id << "|" << pw << " \n";
         send_cmd(oss.str());
         std::string resp = recv_resp();
         std::cout << resp;
-        if (resp.find("OK|") == 0) {
-            logged_in = true;
-        }
+        if (resp.find("OK|") == 0) logged_in = true;
     }
 
     usage();
+
+    // 채팅/알림 수신 스레드 시작
+    std::thread th(recv_thread);
 
     while (true) {
         std::cout << (current_dir.empty() ? "~" : current_dir) << " > ";
         std::string line;
         std::getline(std::cin, line);
         if (line == "/help") { usage(); continue; }
-        if (line == "/quit") {
-            send_cmd("/quit|\n");
-            break;
-        }
+        if (line == "/quit") { send_cmd("/quit|\n"); break; }
+
         std::istringstream iss(line);
         std::string cmd, arg1, arg2;
         iss >> cmd >> arg1 >> arg2;
 
+        // ---- 명령 파싱 및 처리 ----
         if (cmd == "/pwd") {
             std::cout << "/" << (current_dir.empty() ? "" : current_dir) << std::endl;
         }
@@ -141,7 +180,6 @@ int main() {
             }
             std::string new_dir = join_path(current_dir, arg1);
             new_dir = normalize_path(new_dir);
-            // 서버에 실제 폴더 존재 여부 확인
             std::ostringstream oss;
             oss << "/ls|" << new_dir << "|\n";
             send_cmd(oss.str());
@@ -203,9 +241,7 @@ int main() {
             std::cout << recv_resp();
         }
         else if (cmd == "/sharedwithme") {
-            std::ostringstream oss;
-            oss << "/sharedwithme||\n";
-            send_cmd(oss.str());
+            send_cmd("/sharedwithme||\n");
             std::cout << recv_resp();
         }
         else if (cmd == "/search") {
@@ -280,10 +316,28 @@ int main() {
             else
                 std::cout << "\r다운로드 실패: " << local << "           " << std::endl;
         }
+        else if (cmd == "/msg") {
+            std::string msg;
+            std::getline(iss, msg); // arg2 이후 전체 메시지 추출
+            if (!msg.empty() && msg[0] == ' ') msg = msg.substr(1);
+            std::ostringstream oss;
+            oss << "/msg|" << arg1 << "|" << arg2;
+            if (!msg.empty()) oss << " " << msg;
+            oss << "|\n";
+            send_cmd(oss.str());
+            std::cout << recv_resp();
+        }
+        else if (cmd == "/who") {
+            send_cmd("/who||\n");
+            std::cout << recv_resp();
+        }
         else {
             std::cout << "알 수 없는 명령. /help로 도움말 확인\n";
         }
     }
+
+    running = false;
+    th.join();
     close(sock);
     return 0;
 }
