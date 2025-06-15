@@ -31,13 +31,14 @@ void send_cmd(const std::string& cmd) {
     send(sock, cmd.c_str(), cmd.size(), 0);
 }
 
+// 이 함수는 서버 응답을 한 번에 받아온다 (최대 BUFFER_SIZE)
 std::string recv_resp() {
     char buf[BUFFER_SIZE];
     memset(buf, 0, sizeof(buf));
     int len = recv(sock, buf, sizeof(buf)-1, 0);
     if (len <= 0) return "";
     buf[len] = 0;
-    return std::string(buf);
+    return std::string(buf, len);
 }
 
 int main() {
@@ -97,64 +98,54 @@ int main() {
         std::string cmd, arg1, arg2;
         iss >> cmd >> arg1 >> arg2;
 
-        // 진단 로그: 명령 입력
-        std::cout << "[CLIENT] 입력 명령: " << cmd << " arg1: " << arg1 << " arg2: " << arg2 << std::endl;
-
         if (cmd == "/ls") {
             std::ostringstream oss;
             oss << cmd << "|" << arg1 << "|\n";
             send_cmd(oss.str());
-            std::string resp = recv_resp();
-            std::cout << "[CLIENT] 응답: " << resp;
+            std::cout << recv_resp();
         }
         else if (cmd == "/mkdir") {
             std::ostringstream oss;
             oss << cmd << "|" << arg1 << "|\n";
             send_cmd(oss.str());
-            std::string resp = recv_resp();
-            std::cout << "[CLIENT] 응답: " << resp;
+            std::cout << recv_resp();
         }
         else if (cmd == "/rm") {
             std::ostringstream oss;
             oss << cmd << "|" << arg1 << "|\n";
             send_cmd(oss.str());
-            std::string resp = recv_resp();
-            std::cout << "[CLIENT] 응답: " << resp;
+            std::cout << recv_resp();
         }
         else if (cmd == "/mv") {
             std::ostringstream oss;
             oss << cmd << "|" << arg1 << "|" << arg2 << "|\n";
             send_cmd(oss.str());
-            std::string resp = recv_resp();
-            std::cout << "[CLIENT] 응답: " << resp;
+            std::cout << recv_resp();
         }
         else if (cmd == "/share") {
             std::ostringstream oss;
             oss << cmd << "|" << arg1 << "|" << arg2 << "|\n";
             send_cmd(oss.str());
-            std::string resp = recv_resp();
-            std::cout << "[CLIENT] 응답: " << resp;
+            std::cout << recv_resp();
         }
         else if (cmd == "/unshare") {
             std::ostringstream oss;
             oss << cmd << "|" << arg1 << "|" << arg2 << "|\n";
             send_cmd(oss.str());
-            std::string resp = recv_resp();
-            std::cout << "[CLIENT] 응답: " << resp;
+            std::cout << recv_resp();
         }
         else if (cmd == "/sharedwithme") {
             std::ostringstream oss;
             oss << cmd << "||\n";
             send_cmd(oss.str());
-            std::string resp = recv_resp();
-            std::cout << "[CLIENT] 응답: " << resp;
+            std::cout << recv_resp();
         }
         else if (cmd == "/upload") {
             std::string local = arg1;
             std::string remote = arg2.empty() ? arg1 : arg2;
             std::ifstream ifs(local, std::ios::binary | std::ios::ate);
             if (!ifs) {
-                std::cout << "[CLIENT] 파일 열기 실패: " << local << std::endl;
+                std::cout << "파일 열기 실패: " << local << std::endl;
                 continue;
             }
             int filesize = ifs.tellg();
@@ -164,24 +155,20 @@ int main() {
             send_cmd(oss.str());
             char buf[BUFFER_SIZE];
             int sent = 0;
-            std::cout << "[CLIENT] 업로드 시작 (" << filesize << " 바이트)..." << std::endl;
+            std::cout << "업로드 시작 (" << filesize << " 바이트)..." << std::endl;
             while (sent < filesize) {
                 int tosend = std::min(BUFFER_SIZE, filesize - sent);
                 ifs.read(buf, tosend);
                 int l = send(sock, buf, tosend, 0);
-                if (l <= 0) {
-                    std::cout << "[CLIENT] 업로드 중 send 실패(l=" << l << ", sent=" << sent << ")" << std::endl;
-                    break;
-                }
+                if (l <= 0) break;
                 sent += l;
                 int percent = (int)(100.0 * sent / filesize);
                 if (percent % 10 == 0)
                     std::cout << "\r" << percent << "% 완료" << std::flush;
             }
             ifs.close();
-            std::cout << "\r[CLIENT] 업로드 완료           " << std::endl;
-            std::string resp = recv_resp();
-            std::cout << "[CLIENT] 응답: " << resp;
+            std::cout << "\r업로드 완료           " << std::endl;
+            std::cout << recv_resp();
         }
         else if (cmd == "/download") {
             std::string remote = arg1;
@@ -189,52 +176,44 @@ int main() {
             std::ostringstream oss;
             oss << cmd << "|" << remote << "|\n";
             send_cmd(oss.str());
+
+            // 서버 응답(OK|filesize|[file_content...]) 수신
             std::string resp = recv_resp();
-            std::cout << "[CLIENT] 서버 응답: " << resp << std::endl;
             if (resp.substr(0, 3) != "OK|") {
-                std::cout << "[CLIENT] 다운로드 실패(서버 에러): " << resp;
+                std::cout << resp;
                 continue;
             }
             size_t p1 = resp.find('|', 3);
             int filesize = std::stoi(resp.substr(3, p1 - 3));
-            if (filesize <= 0) {
-                std::cout << "[CLIENT] 다운로드 실패: 파일 크기가 0 입니다." << std::endl;
-                continue;
-            }
+            size_t file_start = p1 + 1;
+
             std::ofstream ofs(local, std::ios::binary);
             int recvd = 0;
+            // 먼저 resp 버퍼 안에 파일 내용이 이미 있을 수 있음
+            if (resp.size() > file_start) {
+                int remain = resp.size() - file_start;
+                ofs.write(resp.data() + file_start, remain);
+                recvd += remain;
+            }
+            // 부족한 만큼만 추가로 recv
             char buf[BUFFER_SIZE];
-            std::cout << "[CLIENT] 다운로드 시작 (" << filesize << " 바이트)..." << std::endl;
-            int last_percent = 0;
-            bool failed = false;
             while (recvd < filesize) {
                 int toread = std::min(BUFFER_SIZE, filesize - recvd);
                 int l = recv(sock, buf, toread, 0);
-                if (l <= 0) {
-                    std::cout << "\n[CLIENT] 다운로드 중 recv 실패(l=" << l << ", recvd=" << recvd << ")\n";
-                    failed = true;
-                    break;
-                }
+                if (l <= 0) break;
                 ofs.write(buf, l);
                 recvd += l;
-                std::cout << "[CLIENT] 수신 중: recvd=" << recvd << "/" << filesize << std::endl;
-                int percent = (int)(100.0 * recvd / filesize);
-                if (percent / 10 > last_percent / 10) {
-                    std::cout << "\r" << percent << "% 완료" << std::flush;
-                    last_percent = percent;
-                }
             }
             ofs.close();
-            if (!failed && recvd == filesize)
-                std::cout << "\r[CLIENT] 다운로드 완료: " << local << "           " << std::endl;
+            if (recvd == filesize)
+                std::cout << "\r다운로드 완료: " << local << "           " << std::endl;
             else
-                std::cout << "\r[CLIENT] 다운로드 실패: " << local << "           " << std::endl;
+                std::cout << "\r다운로드 실패: " << local << "           " << std::endl;
         }
         else {
-            std::cout << "[CLIENT] 알 수 없는 명령. /help로 도움말 확인\n";
+            std::cout << "알 수 없는 명령. /help로 도움말 확인\n";
         }
     }
     close(sock);
-    std::cout << "[CLIENT] 연결 종료" << std::endl;
     return 0;
 }

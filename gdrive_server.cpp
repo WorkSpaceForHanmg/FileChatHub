@@ -199,11 +199,7 @@ void handle_client(int client_sock) {
         getline(iss, arg1, '|');
         getline(iss, arg2, '|');
 
-        // 진단 로그: 명령 수신
-        std::cout << "[SERVER] 명령: " << cmd << " arg1: " << arg1 << " arg2: " << arg2 << std::endl;
-
         if (cmd == "/share") {
-            // 1. user_db lock (존재 확인만)
             bool user_ok = false;
             {
                 std::lock_guard<std::mutex> ulock(user_mutex);
@@ -211,11 +207,9 @@ void handle_client(int client_sock) {
                 if (user_db.count(arg2)) user_ok = true;
             }
             if (!user_ok) {
-                std::cout << "[SERVER] 공유 대상 유저 없음: " << arg2 << std::endl;
                 send(client_sock, "ERR|상대 유저 없음\n", 28, 0);
                 continue;
             }
-            // 2. share_map lock (실제 공유 등록)
             {
                 std::lock_guard<std::mutex> slock(share_mutex);
                 load_share_map();
@@ -227,12 +221,10 @@ void handle_client(int client_sock) {
                     }
                 }
                 if (already) {
-                    std::cout << "[SERVER] 이미 공유함: " << arg1 << " to " << arg2 << std::endl;
                     send(client_sock, "ERR|이미 공유한 항목입니다\n", 40, 0);
                 } else {
                     share_map.insert({arg2, {username, arg1}});
                     save_share_map();
-                    std::cout << "[SERVER] 공유 성공: " << arg1 << " to " << arg2 << std::endl;
                     send(client_sock, "OK|공유 성공\n", 18, 0);
                 }
             }
@@ -251,11 +243,9 @@ void handle_client(int client_sock) {
                     }
                 }
                 if (found) {
-                    std::cout << "[SERVER] 공유 해제 성공: " << arg1 << " to " << arg2 << std::endl;
                     save_share_map();
                     send(client_sock, "OK|공유 해제 성공\n", 24, 0);
                 } else {
-                    std::cout << "[SERVER] 공유 항목 없음 (해제 실패): " << arg1 << " to " << arg2 << std::endl;
                     send(client_sock, "ERR|공유 항목 없음\n", 28, 0);
                 }
             }
@@ -271,30 +261,24 @@ void handle_client(int client_sock) {
             }
             std::string result = oss.str();
             if (result.empty()) result = "(공유받은 항목 없음)\n";
-            std::cout << "[SERVER] 공유받은 항목 조회 요청 (by " << username << ")" << std::endl;
             send(client_sock, ("OK|" + result).c_str(), result.size()+3, 0);
         }
         else if (cmd == "/ls") {
             std::string target = arg1.empty() ? "" : "/" + arg1;
             std::string dir = data_root + username + target;
             std::string result = list_dir(dir);
-            std::cout << "[SERVER] 디렉토리 목록 요청: " << dir << std::endl;
             send(client_sock, ("OK|" + result).c_str(), result.size()+3, 0);
         }
         else if (cmd == "/mkdir") {
             std::string dir = data_root + username + "/" + arg1;
-            bool ok = make_dir(dir);
-            std::cout << "[SERVER] 폴더 생성 요청: " << dir << " 결과: " << ok << std::endl;
-            if (ok)
+            if (make_dir(dir))
                 send(client_sock, "OK|폴더 생성 성공\n", 26, 0);
             else
                 send(client_sock, "ERR|폴더 생성 실패\n", 27, 0);
         }
         else if (cmd == "/rm") {
             std::string path = data_root + username + "/" + arg1;
-            bool ok = remove_path(path);
-            std::cout << "[SERVER] 삭제 요청: " << path << " 결과: " << ok << std::endl;
-            if (ok)
+            if (remove_path(path))
                 send(client_sock, "OK|삭제 성공\n", 18, 0);
             else
                 send(client_sock, "ERR|삭제 실패\n", 19, 0);
@@ -302,9 +286,7 @@ void handle_client(int client_sock) {
         else if (cmd == "/mv") {
             std::string from = data_root + username + "/" + arg1;
             std::string to = data_root + username + "/" + arg2;
-            bool ok = move_path(from, to);
-            std::cout << "[SERVER] 이동/이름변경 요청: " << from << " -> " << to << " 결과: " << ok << std::endl;
-            if (ok)
+            if (move_path(from, to))
                 send(client_sock, "OK|이동/이름변경 성공\n", 32, 0);
             else
                 send(client_sock, "ERR|이동/이름변경 실패\n", 33, 0);
@@ -312,7 +294,6 @@ void handle_client(int client_sock) {
         else if (cmd == "/upload") {
             std::string fpath = data_root + username + "/" + arg1;
             int filesize = stoi(arg2);
-            std::cout << "[SERVER] 업로드 요청: " << fpath << " (" << filesize << "바이트)" << std::endl;
             size_t slash = fpath.find_last_of('/');
             if (slash != std::string::npos) {
                 std::string dir = fpath.substr(0, slash);
@@ -331,7 +312,6 @@ void handle_client(int client_sock) {
                 received += l;
             }
             ofs.close();
-            std::cout << "[SERVER] 업로드 완료: " << fpath << " (" << received << "/" << filesize << "바이트)" << std::endl;
             if (received == filesize)
                 send(client_sock, "OK|업로드 성공\n", 22, 0);
             else
@@ -343,11 +323,8 @@ void handle_client(int client_sock) {
             bool found = false;
             bool shared = false;
             std::string owner;
-            std::cout << "[SERVER] 다운로드 요청: " << arg1 << " (from " << username << ")" << std::endl;
-
             if (stat(fpath.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
                 found = true;
-                std::cout << "[SERVER] 내 파일 다운로드: " << fpath << std::endl;
             } else {
                 std::lock_guard<std::mutex> slock(share_mutex);
                 load_share_map();
@@ -361,57 +338,46 @@ void handle_client(int client_sock) {
                 }
                 if (found) {
                     fpath = data_root + owner + "/" + arg1;
-                    std::cout << "[SERVER] 공유받은 파일 다운로드: " << fpath << std::endl;
                     if (stat(fpath.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
-                        std::cout << "[SERVER] 공유 파일 실체가 없음: " << fpath << std::endl;
                         send(client_sock, "ERR|파일 없음\n", 19, 0);
                         continue;
                     }
                 }
             }
             if (!found) {
-                std::cout << "[SERVER] 파일 없음: " << fpath << std::endl;
                 send(client_sock, "ERR|파일 없음\n", 19, 0);
                 continue;
             }
             int filesize = st.st_size;
             std::ifstream ifs(fpath, std::ios::binary);
             if (!ifs) {
-                std::cout << "[SERVER] 파일 열기 실패: " << fpath << std::endl;
                 send(client_sock, "ERR|파일 열기 실패\n", 25, 0);
                 continue;
             }
+            // OK|filesize| 만 전송
             std::ostringstream oss;
             oss << "OK|" << filesize << "|";
-            send(client_sock, oss.str().c_str(), oss.str().size(), 0);
+            std::string header = oss.str();
+            send(client_sock, header.c_str(), header.size(), 0);
+            // 파일 내용만 별도로 전송
             int sent = 0;
             while (sent < filesize) {
                 int tosend = std::min(BUFFER_SIZE, filesize - sent);
                 ifs.read(buffer, tosend);
                 int l = send(client_sock, buffer, tosend, 0);
-                if (l <= 0) {
-                    std::cout << "[SERVER] 파일 전송 에러(l=" << l << ", sent=" << sent << ")\n";
-                    break;
-                }
+                if (l <= 0) break;
                 sent += l;
-                if (filesize > 0 && sent % (filesize / 10 + 1) == 0) {
-                    std::cout << "[SERVER] 전송 중... (" << sent << "/" << filesize << "바이트)" << std::endl;
-                }
             }
             ifs.close();
-            std::cout << "[SERVER] 파일 전송 종료 (" << sent << "/" << filesize << "바이트)" << std::endl;
         }
         else if (cmd == "/quit") {
-            std::cout << "[SERVER] 클라이언트 종료: " << username << std::endl;
             break;
         }
         else {
-            std::cout << "[SERVER] 알 수 없는 명령: " << cmd << std::endl;
             send(client_sock, "ERR|알 수 없는 명령\n", 28, 0);
         }
     }
     close(client_sock);
-    std::cout << "[SERVER] 클라이언트 연결 종료" << std::endl;
 }
 
 int main() {
