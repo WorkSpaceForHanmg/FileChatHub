@@ -18,6 +18,8 @@
 
 std::mutex user_mutex;
 std::mutex share_mutex;
+std::mutex conn_mutex;
+std::map<std::string, int> user_conn; // username -> client_sock
 
 std::string user_db_file = "server_data/users/.userdb";
 std::map<std::string, std::string> user_db;
@@ -119,7 +121,6 @@ bool remove_path(const std::string& path) {
 }
 
 bool move_path(const std::string& from, const std::string& to) {
-    // 디렉토리 생성 필요시 생성
     size_t slash = to.find_last_of('/');
     if (slash != std::string::npos) {
         std::string dir = to.substr(0, slash);
@@ -129,6 +130,26 @@ bool move_path(const std::string& from, const std::string& to) {
     return rename(from.c_str(), to.c_str()) == 0;
 }
 
+void search_recursive(const std::string& base, const std::string& path, const std::string& keyword, std::vector<std::string>& results) {
+    std::string fullpath = base + (path.empty() ? "" : "/" + path);
+    DIR* dir = opendir(fullpath.c_str());
+    if (!dir) return;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        std::string rel = path.empty() ? entry->d_name : path + "/" + entry->d_name;
+        if (strstr(entry->d_name, keyword.c_str())) {
+            results.push_back(rel);
+        }
+        std::string child_full = fullpath + "/" + entry->d_name;
+        struct stat st;
+        if (stat(child_full.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            search_recursive(base, rel, keyword, results);
+        }
+    }
+    closedir(dir);
+}
+
 void handle_client(int client_sock) {
     char buffer[BUFFER_SIZE];
     std::string username;
@@ -136,7 +157,6 @@ void handle_client(int client_sock) {
 
     send(client_sock, "OK|로그인 또는 회원가입 선택: (1) 로그인 (2) 회원가입 입력\n", 60, 0);
 
-    // 로그인/회원가입 루프
     while (!logged_in) {
         memset(buffer, 0, sizeof(buffer));
         int len = recv(client_sock, buffer, sizeof(buffer)-1, 0);
@@ -153,7 +173,7 @@ void handle_client(int client_sock) {
             std::lock_guard<std::mutex> lock(user_mutex);
             load_user_db();
 
-            if (mode == "1") { // 로그인
+            if (mode == "1") {
                 if (user_db.count(id) && user_db[id] == pw) {
                     username = id;
                     logged_in = true;
@@ -163,7 +183,7 @@ void handle_client(int client_sock) {
                     send(client_sock, "ERR|로그인 실패. 다시 시도\n", 40, 0);
                 }
             }
-            else if (mode == "2") { // 회원가입
+            else if (mode == "2") {
                 if (user_db.count(id)) {
                     send(client_sock, "ERR|이미 존재하는 아이디입니다. 다시 시도\n", 60, 0);
                 } else {
@@ -182,11 +202,14 @@ void handle_client(int client_sock) {
     }
 
     {
+        std::lock_guard<std::mutex> lock(conn_mutex);
+        user_conn[username] = client_sock;
+    }
+    {
         std::lock_guard<std::mutex> lock(share_mutex);
         load_share_map();
     }
 
-    // 명령어 루프
     while (true) {
         memset(buffer, 0, sizeof(buffer));
         int len = recv(client_sock, buffer, sizeof(buffer)-1, 0);
@@ -199,7 +222,19 @@ void handle_client(int client_sock) {
         getline(iss, arg1, '|');
         getline(iss, arg2, '|');
 
-        if (cmd == "/share") {
+        if (cmd == "/msg") {
+            std::lock_guard<std::mutex> lock(conn_mutex);
+            auto it = user_conn.find(arg1);
+            if (it != user_conn.end()) {
+                std::ostringstream oss;
+                oss << "MSG|[" << username << "] " << arg2 << "\n";
+                send(it->second, oss.str().c_str(), oss.str().size(), 0);
+                send(client_sock, "OK|메시지 전송 완료\n", 32, 0);
+            } else {
+                send(client_sock, "ERR|상대방이 온라인이 아님\n", 44, 0);
+            }
+        }
+        else if (cmd == "/share") {
             bool user_ok = false;
             {
                 std::lock_guard<std::mutex> ulock(user_mutex);
@@ -354,12 +389,10 @@ void handle_client(int client_sock) {
                 send(client_sock, "ERR|파일 열기 실패\n", 25, 0);
                 continue;
             }
-            // OK|filesize| 만 전송
             std::ostringstream oss;
             oss << "OK|" << filesize << "|";
             std::string header = oss.str();
             send(client_sock, header.c_str(), header.size(), 0);
-            // 파일 내용만 별도로 전송
             int sent = 0;
             while (sent < filesize) {
                 int tosend = std::min(BUFFER_SIZE, filesize - sent);
@@ -370,12 +403,41 @@ void handle_client(int client_sock) {
             }
             ifs.close();
         }
+        else if (cmd == "/search") {
+            std::string keyword = arg1;
+            std::vector<std::string> results;
+            std::string userdir = data_root + username;
+            search_recursive(userdir, "", keyword, results);
+            {
+                std::lock_guard<std::mutex> slock(share_mutex);
+                load_share_map();
+                for (auto it = share_map.lower_bound(username); it != share_map.upper_bound(username); ++it) {
+                    std::string fname = it->second.second;
+                    if (fname.find(keyword) != std::string::npos) {
+                        std::string shared_from = "[공유:" + it->second.first + "] " + fname;
+                        results.push_back(shared_from);
+                    }
+                }
+            }
+            std::ostringstream oss;
+            if (results.empty()) {
+                oss << "OK|(검색 결과 없음)\n";
+            } else {
+                oss << "OK|";
+                for (const auto& r : results) oss << r << "\n";
+            }
+            send(client_sock, oss.str().c_str(), oss.str().size(), 0);
+        }
         else if (cmd == "/quit") {
             break;
         }
         else {
             send(client_sock, "ERR|알 수 없는 명령\n", 28, 0);
         }
+    }
+    {
+        std::lock_guard<std::mutex> lock(conn_mutex);
+        if (!username.empty()) user_conn.erase(username);
     }
     close(client_sock);
 }
