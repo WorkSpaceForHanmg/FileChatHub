@@ -60,7 +60,6 @@ void print_welcome() {
     std::cout << "   - 이 프로그램은 서버와 파일/폴더를 주고받고,\n";
     std::cout << "     다른 사용자와 채팅 및 파일 공유가 가능합니다.\n";
     std::cout << "========================================\n";
-    std::cout << "명령어가 궁금하면 /help 또는 /? 를 입력하세요.\n";
     std::cout << std::endl;
 }
 
@@ -70,6 +69,7 @@ void usage() {
     std::cout << "[ FileChatHub 사용법 및 명령어 안내 ]\n";
     std::cout << "서버에 파일을 업로드/다운로드하거나, 폴더/파일 관리\n";
     std::cout << "그리고 실시간 채팅/공유 기능을 사용할 수 있습니다.\n";
+    std::cout << "명령어가 궁금하면 /help 또는 /? 를 입력하세요.\n";
     std::cout << "명령어는 반드시 앞에 '/'를 붙여 입력하세요.\n";
     std::cout << "----------------------------------------\n";
     std::cout <<
@@ -99,7 +99,7 @@ void print_command_guide() {
     std::cout << "  /ls myfolder  (myfolder 폴더 목록)\n";
     std::cout << "  /cd myfolder  (myfolder로 이동)\n";
     std::cout << "  /upload sample.txt      (sample.txt 파일 업로드)\n";
-    std::cout << "  /download server.txt    (server.txt 파일 다운로드)\n";
+    std::cout << "  /download test.txt    (test.txt 파일 다운로드)\n";
     std::cout << "  /msg alice 안녕하세요!  (alice에게 메시지 보내기)\n";
     std::cout << "  /who          (현재 접속자 목록)\n";
     std::cout << "----------------------------------------\n";
